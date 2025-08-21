@@ -9,8 +9,8 @@ use crate::{
     state::{
         ActionListItem, Album, AlbumId, Artist, ArtistFocusState, ArtistId, ArtistPopupAction,
         BrowsePageUIState, Context, ContextId, ContextPageType, ContextPageUIState, DataReadGuard,
-        Focusable, Id, Item, ItemId, LibraryFocusState, LibraryPageUIState, PageState, PageType,
-        PlayableId, Playback, PlaylistCreateCurrentField, PlaylistFolderItem, PlaylistId,
+        Focusable, Id, Item, ItemId, LibraryFocusState, LibraryPageUIState, MutableWindowState,
+        PageState, PageType, PlayableId, Playback, PlaylistCreateCurrentField, PlaylistFolderItem, PlaylistId,
         PlaylistPopupAction, PopupState, SearchFocusState, SearchPageUIState, SharedState, ShowId,
         Track, TrackId, TrackOrder, UIStateGuard, USER_LIKED_TRACKS_ID,
         USER_RECENTLY_PLAYED_TRACKS_ID, USER_TOP_TRACKS_ID,
@@ -65,28 +65,269 @@ fn handle_mouse_event(
     client_pub: &flume::Sender<ClientRequest>,
     state: &SharedState,
 ) -> Result<()> {
-    // a left click event
-    if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = event.kind
-    {
-        tracing::debug!("Handling mouse event: {event:?}");
-        let rect = state.ui.lock().playback_progress_bar_rect;
-        if event.row == rect.y {
-            // calculate the seek position (in ms) based on the mouse click position,
-            // the progress bar's width and the track's duration (in ms)
-            let player = state.player.read();
-            let duration = match player.currently_playing() {
-                Some(rspotify::model::PlayableItem::Track(track)) => Some(track.duration),
-                Some(rspotify::model::PlayableItem::Episode(episode)) => Some(episode.duration),
-                None => None,
-            };
-            if let Some(duration) = duration {
-                let position_ms =
-                    (duration.num_milliseconds()) * i64::from(event.column) / i64::from(rect.width);
-                client_pub.send(ClientRequest::Player(PlayerRequest::SeekTrack(
-                    chrono::Duration::try_milliseconds(position_ms).unwrap(),
-                )))?;
+    let mut ui = state.ui.lock();
+    let rect_contains = |r: ratatui::layout::Rect, col: u16, row: u16| -> bool {
+        col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+    };
+
+    match event.kind {
+        // Scroll to move selection down/up within focused pane
+        crossterm::event::MouseEventKind::ScrollDown => {
+            if let Some(selected) = ui.current_page_mut().selected() {
+                ui.current_page_mut().select(selected.saturating_add(1));
+            } else {
+                ui.current_page_mut().select(0);
             }
         }
+        crossterm::event::MouseEventKind::ScrollUp => {
+            if let Some(selected) = ui.current_page_mut().selected() {
+                ui.current_page_mut().select(selected.saturating_sub(1));
+            }
+        }
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            tracing::debug!("Handling mouse event: {event:?}");
+            // Detect double click
+            let now = std::time::Instant::now();
+            let is_double = ui
+                .last_click
+                .map(|lc| lc.col == event.column && lc.row == event.row && now.duration_since(lc.when) <= std::time::Duration::from_millis(400))
+                .unwrap_or(false);
+            ui.last_click = Some(crate::state::LastClick {
+                when: now,
+                col: event.column,
+                row: event.row,
+            });
+
+            // Handle click on playback progress bar to seek
+            let pbar = ui.playback_progress_bar_rect;
+            if event.row == pbar.y && pbar.width > 0 {
+                let player = state.player.read();
+                let duration = match player.currently_playing() {
+                    Some(rspotify::model::PlayableItem::Track(track)) => Some(track.duration),
+                    Some(rspotify::model::PlayableItem::Episode(episode)) => Some(episode.duration),
+                    None => None,
+                };
+                if let Some(duration) = duration {
+                    // Clamp column within bar
+                    let rel_col = event
+                        .column
+                        .saturating_sub(pbar.x)
+                        .min(pbar.width.saturating_sub(1));
+                    let position_ms =
+                        (duration.num_milliseconds()) * i64::from(rel_col) / i64::from(pbar.width);
+                    drop(ui);
+                    client_pub.send(ClientRequest::Player(PlayerRequest::SeekTrack(
+                        chrono::Duration::try_milliseconds(position_ms).unwrap(),
+                    )))?;
+                    return Ok(());
+                }
+            }
+
+            // Hit-test panes and update focus/selection
+            let col = event.column;
+            let row = event.row;
+            // Copy rects to avoid immutable borrow while mutably borrowing page state
+            let rects = ui.rects;
+            match ui.current_page_mut() {
+                PageState::Library { state: lib } => {
+                    if rect_contains(rects.library_playlists, col, row) {
+                        lib.focus = LibraryFocusState::Playlists;
+                        let y = row.saturating_sub(rects.library_playlists.y);
+                        lib.playlist_list.select(Some(y as usize));
+                        if is_double {
+                            drop(lib);
+                            drop(ui);
+                            // Trigger choose selected on double click
+                            let mut ui2 = state.ui.lock();
+                            let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                            return Ok(());
+                        }
+                    } else if rect_contains(rects.library_albums, col, row) {
+                        lib.focus = LibraryFocusState::SavedAlbums;
+                        let y = row.saturating_sub(rects.library_albums.y);
+                        lib.saved_album_list.select(Some(y as usize));
+                        if is_double {
+                            drop(lib);
+                            drop(ui);
+                            let mut ui2 = state.ui.lock();
+                            let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                            return Ok(());
+                        }
+                    } else if rect_contains(rects.library_artists, col, row) {
+                        lib.focus = LibraryFocusState::FollowedArtists;
+                        let y = row.saturating_sub(rects.library_artists.y);
+                        lib.followed_artist_list.select(Some(y as usize));
+                        if is_double {
+                            drop(lib);
+                            drop(ui);
+                            let mut ui2 = state.ui.lock();
+                            let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                            return Ok(());
+                        }
+                    }
+                }
+                PageState::Search { state: search, .. } => {
+                    if rect_contains(rects.search_tracks, col, row) {
+                        search.focus = SearchFocusState::Tracks;
+                        let y = row.saturating_sub(rects.search_tracks.y);
+                        search.track_list.select(Some(y as usize));
+                        if is_double {
+                            drop(search);
+                            drop(ui);
+                            let mut ui2 = state.ui.lock();
+                            let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                            return Ok(());
+                        }
+                    } else if rect_contains(rects.search_albums, col, row) {
+                        search.focus = SearchFocusState::Albums;
+                        let y = row.saturating_sub(rects.search_albums.y);
+                        search.album_list.select(Some(y as usize));
+                        if is_double {
+                            drop(search);
+                            drop(ui);
+                            let mut ui2 = state.ui.lock();
+                            let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                            return Ok(());
+                        }
+                    } else if rect_contains(rects.search_artists, col, row) {
+                        search.focus = SearchFocusState::Artists;
+                        let y = row.saturating_sub(rects.search_artists.y);
+                        search.artist_list.select(Some(y as usize));
+                        if is_double {
+                            drop(search);
+                            drop(ui);
+                            let mut ui2 = state.ui.lock();
+                            let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                            return Ok(());
+                        }
+                    } else if rect_contains(rects.search_playlists, col, row) {
+                        search.focus = SearchFocusState::Playlists;
+                        let y = row.saturating_sub(rects.search_playlists.y);
+                        search.playlist_list.select(Some(y as usize));
+                        if is_double {
+                            drop(search);
+                            drop(ui);
+                            let mut ui2 = state.ui.lock();
+                            let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                            return Ok(());
+                        }
+                    } else if rect_contains(rects.search_shows, col, row) {
+                        search.focus = SearchFocusState::Shows;
+                        let y = row.saturating_sub(rects.search_shows.y);
+                        search.show_list.select(Some(y as usize));
+                        if is_double {
+                            drop(search);
+                            drop(ui);
+                            let mut ui2 = state.ui.lock();
+                            let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                            return Ok(());
+                        }
+                    } else if rect_contains(rects.search_episodes, col, row) {
+                        search.focus = SearchFocusState::Episodes;
+                        let y = row.saturating_sub(rects.search_episodes.y);
+                        search.episode_list.select(Some(y as usize));
+                        if is_double {
+                            drop(search);
+                            drop(ui);
+                            let mut ui2 = state.ui.lock();
+                            let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                            return Ok(());
+                        }
+                    }
+                }
+                PageState::Context { state: cstate, .. } => {
+                    if let Some(ContextPageUIState::Artist { focus, top_track_table, album_table, related_artist_list }) = cstate.as_mut() {
+                        if rect_contains(rects.context_artist_top_tracks, col, row) {
+                            *focus = ArtistFocusState::TopTracks;
+                            let y = row
+                                .saturating_sub(rects.context_artist_top_tracks.y)
+                                .saturating_sub(1); // adjust for table header
+                            top_track_table.select(Some(y as usize));
+                            if is_double {
+                                drop(ui);
+                                let mut ui2 = state.ui.lock();
+                                let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                                return Ok(());
+                            }
+                        } else if rect_contains(rects.context_artist_albums, col, row) {
+                            *focus = ArtistFocusState::Albums;
+                            let y = row
+                                .saturating_sub(rects.context_artist_albums.y)
+                                .saturating_sub(1); // adjust for table header
+                            album_table.select(Some(y as usize));
+                            if is_double {
+                                drop(ui);
+                                let mut ui2 = state.ui.lock();
+                                let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                                return Ok(());
+                            }
+                        } else if rect_contains(rects.context_artist_related_artists, col, row) {
+                            *focus = ArtistFocusState::RelatedArtists;
+                            let y = row.saturating_sub(rects.context_artist_related_artists.y);
+                            related_artist_list.select(Some(y as usize));
+                            if is_double {
+                                drop(ui);
+                                let mut ui2 = state.ui.lock();
+                                let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                                return Ok(());
+                            }
+                        }
+                    } else if let Some(state_variant) = cstate.as_mut() {
+                        // Generic tracks/episodes table
+                        if rect_contains(rects.context_tracks, col, row) {
+                            // All context tables render a header row, so subtract 1
+                            let header_offset: u16 = 1;
+                            let y = row
+                                .saturating_sub(rects.context_tracks.y)
+                                .saturating_sub(header_offset);
+                            if let Some(mut s) = ui.current_page_mut().focus_window_state_mut() {
+                                s.select(y as usize);
+                            }
+                            if is_double {
+                                drop(ui);
+                                let mut ui2 = state.ui.lock();
+                                let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                PageState::Browse { state: _ } => {
+                    if rect_contains(rects.browse_list, col, row) {
+                        if let Some(MutableWindowState::List(list)) = ui.current_page_mut().focus_window_state_mut() {
+                            let y = row.saturating_sub(rects.browse_list.y);
+                            list.select(Some(y as usize));
+                        }
+                        if is_double {
+                            drop(ui);
+                            let mut ui2 = state.ui.lock();
+                            let _ = page::handle_key_sequence_for_page(&KeySequence { keys: vec![Key::None(KeyCode::Enter)] }, client_pub, state, &mut ui2);
+                            return Ok(());
+                        }
+                    }
+                }
+                PageState::Queue { scroll_offset: _ } => {
+                    if rect_contains(rects.queue_rect, col, row) {
+                        if let Some(MutableWindowState::Scroll(scroll)) = ui.current_page_mut().focus_window_state_mut() {
+                            let base = rects.queue_rect.y;
+                            // queue table has a header row
+                            *scroll = row.saturating_sub(base).saturating_sub(1) as usize;
+                        }
+                    }
+                }
+                PageState::CommandHelp { scroll_offset: _ } => {
+                    if rect_contains(rects.command_help_rect, col, row) {
+                        if let Some(MutableWindowState::Scroll(scroll)) = ui.current_page_mut().focus_window_state_mut() {
+                            let base = rects.command_help_rect.y;
+                            // help table has a header row
+                            *scroll = row.saturating_sub(base).saturating_sub(1) as usize;
+                        }
+                    }
+                }
+                PageState::Lyrics { .. } => {}
+            }
+        }
+        _ => {}
     }
     Ok(())
 }

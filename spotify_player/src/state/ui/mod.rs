@@ -43,6 +43,12 @@ pub struct UIState {
 
     #[cfg(feature = "image")]
     pub last_cover_image_render_info: ImageRenderInfo,
+
+    /// Rectangles of interactive panes for mouse hit-testing
+    pub rects: UIRects,
+
+    /// Track last click timestamp and position for double-click detection
+    pub last_click: Option<LastClick>,
 }
 
 impl UIState {
@@ -116,6 +122,43 @@ impl UIState {
         }
     }
 }
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UIRects {
+    // Library page
+    pub library_playlists: ratatui::layout::Rect,
+    pub library_albums: ratatui::layout::Rect,
+    pub library_artists: ratatui::layout::Rect,
+
+    // Search page
+    pub search_input: ratatui::layout::Rect,
+    pub search_tracks: ratatui::layout::Rect,
+    pub search_albums: ratatui::layout::Rect,
+    pub search_artists: ratatui::layout::Rect,
+    pub search_playlists: ratatui::layout::Rect,
+    pub search_shows: ratatui::layout::Rect,
+    pub search_episodes: ratatui::layout::Rect,
+
+    // Context pages (generic tracks table)
+    pub context_tracks: ratatui::layout::Rect,
+    // Context Artist page
+    pub context_artist_top_tracks: ratatui::layout::Rect,
+    pub context_artist_albums: ratatui::layout::Rect,
+    pub context_artist_related_artists: ratatui::layout::Rect,
+
+    // Browse page
+    pub browse_list: ratatui::layout::Rect,
+
+    // Other pages
+    pub queue_rect: ratatui::layout::Rect,
+    pub command_help_rect: ratatui::layout::Rect,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LastClick {
+    pub when: std::time::Instant,
+    pub col: u16,
+    pub row: u16,
+}
 
 #[cfg(feature = "fzf")]
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -162,6 +205,10 @@ impl Default for UIState {
 
             #[cfg(feature = "image")]
             last_cover_image_render_info: ImageRenderInfo::default(),
+
+            rects: UIRects::default(),
+
+            last_click: None,
         }
     }
 }

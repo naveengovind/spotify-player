@@ -130,6 +130,15 @@ pub fn render_search_page(
     let episode_rect =
         construct_and_render_block("Episodes", &ui.theme, Borders::TOP, frame, chunks[5]);
 
+    // Store rects for mouse hit-testing (defer writing until after immutable borrows)
+    let rects_search_input = search_input_rect;
+    let rects_search_tracks = track_rect;
+    let rects_search_albums = album_rect;
+    let rects_search_artists = artist_rect;
+    let rects_search_playlists = playlist_rect;
+    let rects_search_shows = show_rect;
+    let rects_search_episodes = episode_rect;
+
     // 3. Construct the page's widgets
     let (track_list, n_tracks) = {
         let track_items = search_results
@@ -196,6 +205,18 @@ pub fn render_search_page(
         line_input.widget(is_active && focus_state == SearchFocusState::Input),
         search_input_rect,
     );
+
+    // Apply rects after input render to avoid borrow conflicts
+    {
+        let rects = &mut ui.rects;
+        rects.search_input = rects_search_input;
+        rects.search_tracks = rects_search_tracks;
+        rects.search_albums = rects_search_albums;
+        rects.search_artists = rects_search_artists;
+        rects.search_playlists = rects_search_playlists;
+        rects.search_shows = rects_search_shows;
+        rects.search_episodes = rects_search_episodes;
+    }
 
     // Render the search result windows.
     // Need mutable access to the list/table states stored inside the page state for rendering.
@@ -343,7 +364,11 @@ pub fn render_context_page(
                         );
                         chunks[1]
                     };
-
+                    // Store rect for context tracks table (playlist)
+                    {
+                        let rects = &mut ui.rects;
+                        rects.context_tracks = rect;
+                    }
                     render_track_table(
                         frame,
                         rect,
@@ -355,6 +380,11 @@ pub fn render_context_page(
                     );
                 }
                 Context::Tracks { tracks, .. } | Context::Album { tracks, .. } => {
+                    // Store rect for context tracks table (album/tracks)
+                    {
+                        let rects = &mut ui.rects;
+                        rects.context_tracks = rect;
+                    }
                     render_track_table(
                         frame,
                         rect,
@@ -366,6 +396,11 @@ pub fn render_context_page(
                     );
                 }
                 Context::Show { episodes, .. } => {
+                    // Store rect for context episodes table
+                    {
+                        let rects = &mut ui.rects;
+                        rects.context_tracks = rect;
+                    }
                     render_episode_table(
                         frame,
                         rect,
@@ -440,6 +475,14 @@ pub fn render_library_page(
     );
     let artist_rect =
         construct_and_render_block("Artists", &ui.theme, Borders::ALL, frame, chunks[2]);
+
+    // Store rects for mouse hit-testing
+    {
+        let rects = &mut ui.rects;
+        rects.library_playlists = playlist_rect;
+        rects.library_albums = album_rect;
+        rects.library_artists = artist_rect;
+    }
 
     // 3. Construct the page's widgets
     // Construct the playlist window
@@ -559,11 +602,14 @@ pub fn render_browse_page(
     };
 
     // 4. Render the page's widget
+    let rect_copy = rect;
     let Some(MutableWindowState::List(list_state)) = ui.current_page_mut().focus_window_state_mut()
     else {
         return;
     };
-    utils::render_list_window(frame, list, rect, len, list_state);
+    // Render first, then update rect to avoid borrow conflicts
+    utils::render_list_window(frame, list, rect_copy, len, list_state);
+    ui.rects.browse_list = rect_copy;
 }
 
 pub fn render_lyrics_page(
@@ -714,6 +760,7 @@ pub fn render_commands_help_page(frame: &mut Frame, ui: &mut UIStateGuard, rect:
     );
 
     // 4. Render the page's widget
+    ui.rects.command_help_rect = rect;
     frame.render_widget(help_table, rect);
 }
 
@@ -802,6 +849,8 @@ pub fn render_queue_page(
     );
 
     // 4. Render page's widget
+    // Store rect for mouse hit-testing
+    ui.rects.queue_rect = rect;
     frame.render_widget(queue_table, rect);
 }
 
@@ -849,6 +898,13 @@ fn render_artist_context_page_windows(
     );
     let related_artists_rect =
         construct_and_render_block("Related Artists", &ui.theme, Borders::TOP, frame, chunks[1]);
+
+    // Store rects for mouse hit-testing
+    {
+        let rects = &mut ui.rects;
+        rects.context_artist_albums = albums_rect;
+        rects.context_artist_related_artists = related_artists_rect;
+    }
 
     // 3. Construct the page's widgets
     // album table
@@ -901,6 +957,11 @@ fn render_artist_context_page_windows(
     };
 
     // 4. Render the page's widgets
+    {
+        // Store rect for top tracks
+        let rects = &mut ui.rects;
+        rects.context_artist_top_tracks = top_tracks_rect;
+    }
     render_track_table(
         frame,
         top_tracks_rect,
