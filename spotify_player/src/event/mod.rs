@@ -242,7 +242,8 @@ fn handle_mouse_event(
                             let y = row
                                 .saturating_sub(rects.context_artist_top_tracks.y)
                                 .saturating_sub(1); // adjust for table header
-                            top_track_table.select(Some(y as usize));
+                            let start = top_track_table.offset();
+                            top_track_table.select(Some(start + y as usize));
                             if is_double {
                                 drop(ui);
                                 let mut ui2 = state.ui.lock();
@@ -254,7 +255,8 @@ fn handle_mouse_event(
                             let y = row
                                 .saturating_sub(rects.context_artist_albums.y)
                                 .saturating_sub(1); // adjust for table header
-                            album_table.select(Some(y as usize));
+                            let start = album_table.offset();
+                            album_table.select(Some(start + y as usize));
                             if is_double {
                                 drop(ui);
                                 let mut ui2 = state.ui.lock();
@@ -280,8 +282,19 @@ fn handle_mouse_event(
                             let y = row
                                 .saturating_sub(rects.context_tracks.y)
                                 .saturating_sub(header_offset);
-                            if let Some(mut s) = ui.current_page_mut().focus_window_state_mut() {
-                                s.select(y as usize);
+                            // Add current table offset for proper mapping when scrolled
+                            match state_variant {
+                                ContextPageUIState::Tracks { track_table }
+                                | ContextPageUIState::Album { track_table }
+                                | ContextPageUIState::Playlist { track_table } => {
+                                    let start = track_table.offset();
+                                    track_table.select(Some(start + y as usize));
+                                }
+                                ContextPageUIState::Show { episode_table } => {
+                                    let start = episode_table.offset();
+                                    episode_table.select(Some(start + y as usize));
+                                }
+                                ContextPageUIState::Artist { .. } => {}
                             }
                             if is_double {
                                 drop(ui);
