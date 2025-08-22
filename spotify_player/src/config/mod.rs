@@ -95,6 +95,10 @@ pub struct AppConfig {
     pub cover_img_width: usize,
     #[cfg(feature = "image")]
     pub cover_img_scale: f32,
+    #[cfg(feature = "image")]
+    pub cover_img_scale_x: f32,
+    #[cfg(feature = "image")]
+    pub cover_img_scale_y: f32,
     #[cfg(feature = "pixelate")]
     pub cover_img_pixels: u32,
 
@@ -309,6 +313,10 @@ impl Default for AppConfig {
             cover_img_width: 5,
             #[cfg(feature = "image")]
             cover_img_scale: 1.0,
+            #[cfg(feature = "image")]
+            cover_img_scale_x: 1.0,
+            #[cfg(feature = "image")]
+            cover_img_scale_y: 1.0,
             #[cfg(feature = "pixelate")]
             cover_img_pixels: 16,
 

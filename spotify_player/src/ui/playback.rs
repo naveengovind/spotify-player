@@ -43,6 +43,7 @@ pub fn render_playback_window(
                         let configs = config::get_config();
                         // Split the allocated rectangle into `metadata_rect` and `cover_img_rect`
                         let (metadata_rect, cover_img_rect) = {
+                            // Place cover image on the left and metadata on the right (original behavior)
                             let hor_chunks = Layout::horizontal([
                                 Constraint::Length(configs.app_config.cover_img_length as u16),
                                 Constraint::Fill(0), // metadata_rect
@@ -399,14 +400,15 @@ fn render_playback_cover_image(state: &SharedState, ui: &mut UIStateGuard) -> Re
     if let Some(image) = data.caches.images.get(&ui.last_cover_image_render_info.url) {
         let rect = ui.last_cover_image_render_info.render_area;
 
-        // `viuer` renders image using `sixel` in a different scale compared to other methods.
-        // Scale the image to make the rendered image more fit if needed.
-        // This scaling factor is user configurable as the scale works differently
-        // with different fonts and terminals.
-        // For more context, see https://github.com/aome510/spotify-player/issues/122.
-        let scale = config::get_config().app_config.cover_img_scale;
-        let width = (f32::from(rect.width) * scale).round() as u32;
-        let height = (f32::from(rect.height) * scale).round() as u32;
+        // Scale image with per-axis scale to correct cell aspect ratio.
+        // Use `cover_img_scale_x` and `cover_img_scale_y` if set, otherwise fallback to `cover_img_scale`.
+        let cfg = &config::get_config().app_config;
+        let sx = if cfg.cover_img_scale_x > 0.0 { cfg.cover_img_scale_x } else { cfg.cover_img_scale };
+        let sy = if cfg.cover_img_scale_y > 0.0 { cfg.cover_img_scale_y } else { cfg.cover_img_scale };
+        // Clamp to a square to avoid rectangular distortion and overflow
+        let side = rect.width.min(rect.height);
+        let width = (f32::from(side) * sx).round() as u32;
+        let height = (f32::from(side) * sy).round() as u32;
 
         viuer::print(
             image,
