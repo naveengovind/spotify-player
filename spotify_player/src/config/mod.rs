@@ -99,6 +99,8 @@ pub struct AppConfig {
     pub cover_img_scale_x: f32,
     #[cfg(feature = "image")]
     pub cover_img_scale_y: f32,
+    #[cfg(feature = "image")]
+    pub image_protocol: Option<String>,
     #[cfg(feature = "pixelate")]
     pub cover_img_pixels: u32,
 
@@ -317,6 +319,8 @@ impl Default for AppConfig {
             cover_img_scale_x: 1.0,
             #[cfg(feature = "image")]
             cover_img_scale_y: 1.0,
+            #[cfg(feature = "image")]
+            image_protocol: None,
             #[cfg(feature = "pixelate")]
             cover_img_pixels: 16,
 
@@ -375,7 +379,7 @@ impl Default for LayoutConfig {
                 album_percent: 40,
             },
             playback_window_position: Position::Top,
-            playback_window_height: 6,
+            playback_window_height: 4,
         }
     }
 }

@@ -43,20 +43,31 @@ pub fn render_playback_window(
                         let configs = config::get_config();
                         // Split the allocated rectangle into `metadata_rect` and `cover_img_rect`
                         let (metadata_rect, cover_img_rect) = {
-                            // Place cover image on the left and metadata on the right (original behavior)
+                            // Use configured dimensions directly
+                            let img_width = configs.app_config.cover_img_width as u16;
+                            let img_height = configs.app_config.cover_img_length as u16;
+                            
+                            // Place cover image on the left and metadata on the right
                             let hor_chunks = Layout::horizontal([
-                                Constraint::Length(configs.app_config.cover_img_length as u16),
+                                Constraint::Length(img_width),
                                 Constraint::Fill(0), // metadata_rect
                             ])
                             .spacing(1)
                             .split(rect);
-                            let ver_chunks = Layout::vertical([
-                                Constraint::Length(configs.app_config.cover_img_width as u16), // cover_img_rect
-                                Constraint::Fill(0), // empty space
-                            ])
-                            .split(hor_chunks[0]);
+                            // Calculate the actual height needed for a square image
+                            // Terminal characters are typically ~2:1 (height:width) in pixels
+                            // So for a square image, we need height = width / 2 in character units
+                            let actual_img_width = img_width.min(hor_chunks[0].width);
+                            let actual_img_height = (actual_img_width / 2).max(1).min(img_height).min(hor_chunks[0].height);
+                            
+                            let cover_img_rect = Rect {
+                                x: hor_chunks[0].x,
+                                y: hor_chunks[0].y,
+                                width: actual_img_width,
+                                height: actual_img_height,
+                            };
 
-                            (hor_chunks[1], ver_chunks[0])
+                            (hor_chunks[1], cover_img_rect)
                         };
 
                         let url = match item {
@@ -399,30 +410,155 @@ fn render_playback_cover_image(state: &SharedState, ui: &mut UIStateGuard) -> Re
     let data = state.data.read();
     if let Some(image) = data.caches.images.get(&ui.last_cover_image_render_info.url) {
         let rect = ui.last_cover_image_render_info.render_area;
+        
+        // Ensure the image is square by resizing it
+        let square_size = image.width().min(image.height());
+        let square_image = if image.width() != image.height() {
+            // Crop to square from center
+            let x_offset = (image.width() - square_size) / 2;
+            let y_offset = (image.height() - square_size) / 2;
+            image.crop_imm(x_offset, y_offset, square_size, square_size)
+        } else {
+            image.clone()
+        };
 
-        // Scale image with per-axis scale to correct cell aspect ratio.
-        // Use `cover_img_scale_x` and `cover_img_scale_y` if set, otherwise fallback to `cover_img_scale`.
+        // Scale image to fill the allocated rectangle as a square
         let cfg = &config::get_config().app_config;
-        let sx = if cfg.cover_img_scale_x > 0.0 { cfg.cover_img_scale_x } else { cfg.cover_img_scale };
-        let sy = if cfg.cover_img_scale_y > 0.0 { cfg.cover_img_scale_y } else { cfg.cover_img_scale };
-        // Clamp to a square to avoid rectangular distortion and overflow
-        let side = rect.width.min(rect.height);
-        let width = (f32::from(side) * sx).round() as u32;
-        let height = (f32::from(side) * sy).round() as u32;
-
-        viuer::print(
-            image,
-            &viuer::Config {
-                x: rect.x,
-                y: rect.y as i16,
-                width: Some(width),
-                height: Some(height),
-                restore_cursor: true,
-                transparent: true,
-                ..Default::default()
-            },
-        )
-        .context("print image to the terminal")?;
+        
+        // Use configured dimensions directly
+        let width = (cfg.cover_img_width as u16).min(rect.width) as u32;
+        let height = (cfg.cover_img_length as u16).min(rect.height) as u32;
+        
+        // Log the actual dimensions being used
+        tracing::info!("Image render area: {}x{} at ({},{})", width, height, rect.x, rect.y);
+        
+        let mut config = viuer::Config {
+            x: rect.x,
+            y: rect.y as i16,
+            width: Some(width),
+            height: Some(height),
+            restore_cursor: true,
+            transparent: true,
+            use_kitty: false,  // Don't force Kitty by default
+            use_iterm: false,
+            #[cfg(feature = "sixel")]
+            use_sixel: false,
+            ..Default::default()
+        };
+        
+        // Check if user has specified a protocol preference
+        if let Some(ref protocol) = cfg.image_protocol {
+            match protocol.to_lowercase().as_str() {
+                "kitty" => {
+                    config.use_kitty = true;
+                    config.use_iterm = false;
+                    #[cfg(feature = "sixel")]
+                    {
+                        config.use_sixel = false;
+                    }
+                    tracing::info!("Using Kitty protocol (user configured)");
+                }
+                "iterm" => {
+                    config.use_iterm = true;
+                    config.use_kitty = false;
+                    #[cfg(feature = "sixel")]
+                    {
+                        config.use_sixel = false;
+                    }
+                    tracing::info!("Using iTerm protocol (user configured)");
+                }
+                #[cfg(feature = "sixel")]
+                "sixel" => {
+                    config.use_sixel = true;
+                    config.use_kitty = false;
+                    config.use_iterm = false;
+                    tracing::info!("Using Sixel protocol (user configured)");
+                }
+                _ => {
+                    // Default to sixel if feature is enabled and no protocol specified
+                    #[cfg(feature = "sixel")]
+                    {
+                        config.use_sixel = true;
+                        config.use_kitty = false;
+                        config.use_iterm = false;
+                        tracing::info!("Defaulting to Sixel protocol");
+                    }
+                    #[cfg(not(feature = "sixel"))]
+                    {
+                        config.use_kitty = true;
+                        tracing::info!("Defaulting to Kitty protocol");
+                    }
+                }
+            }
+        } else {
+            // Auto-detect terminal capabilities
+            let in_tmux = std::env::var("TMUX").is_ok();
+            let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+            let term = std::env::var("TERM").unwrap_or_default();
+            
+            tracing::info!("Terminal detection: TMUX={}, TERM_PROGRAM={}, TERM={}", in_tmux, term_program, term);
+            
+            // Check for sixel support first if feature is enabled
+            #[cfg(feature = "sixel")]
+            {
+                // Many modern terminals support sixel
+                let supports_sixel = term.contains("xterm") || 
+                                    term.contains("mlterm") ||
+                                    term.contains("foot") ||
+                                    term.contains("wezterm") ||
+                                    term_program.contains("wezterm") ||
+                                    term.contains("contour") ||
+                                    term.contains("mintty");
+                
+                if supports_sixel {
+                    config.use_sixel = true;
+                    config.use_kitty = false;
+                    config.use_iterm = false;
+                    tracing::info!("Using Sixel protocol (auto-detected)");
+                } else {
+                    // Fall back to other protocols
+                    let is_ghostty = term_program == "ghostty" || 
+                                     term.contains("ghostty") ||
+                                     std::env::var("GHOSTTY_RESOURCES_DIR").is_ok();
+                    
+                    if is_ghostty || in_tmux {
+                        config.use_kitty = true;
+                        config.use_iterm = false;
+                        config.use_sixel = false;
+                        tracing::info!("Using Kitty protocol for Ghostty/tmux (detected: ghostty={}, tmux={})", is_ghostty, in_tmux);
+                    }
+                }
+            }
+            
+            #[cfg(not(feature = "sixel"))]
+            {
+                // Detect Ghostty and handle tmux passthrough
+                let is_ghostty = term_program == "ghostty" || 
+                                 term.contains("ghostty") ||
+                                 std::env::var("GHOSTTY_RESOURCES_DIR").is_ok();
+                
+                if is_ghostty || in_tmux {
+                    config.use_kitty = true;
+                    config.use_iterm = false;
+                    tracing::info!("Using Kitty protocol for Ghostty/tmux (detected: ghostty={}, tmux={})", is_ghostty, in_tmux);
+                }
+            }
+        }
+        
+        // Try to force better rendering by disabling fallback
+        if config.use_kitty || config.use_iterm {
+            // When we want to use Kitty/iTerm, disable the block fallback
+            std::env::set_var("VIUER_DISABLE_BLOCKS", "1");
+        }
+        
+        // Try to print with viuer first
+        let print_result = viuer::print(&square_image, &config);
+        
+        if print_result.is_err() {
+            tracing::warn!("Failed to print image with viuer: {:?}", print_result);
+        }
+        
+        print_result.context("print image to the terminal")?;
 
         ui.last_cover_image_render_info.rendered = true;
     }
@@ -434,25 +570,30 @@ fn render_playback_cover_image(state: &SharedState, ui: &mut UIStateGuard) -> Re
 /// and the second one for the main application's layout (popup, page, etc).
 fn split_rect_for_playback_window(rect: Rect) -> (Rect, Rect) {
     let configs = config::get_config();
-    let playback_width = configs.app_config.layout.playback_window_height;
-    // the playback window's width should not be smaller than the cover image's width + 1
+    let playback_height = configs.app_config.layout.playback_window_height;
+    // the playback window's height should not be smaller than the cover image's height + 1
     #[cfg(feature = "image")]
-    let playback_width = std::cmp::max(configs.app_config.cover_img_width + 1, playback_width);
+    let playback_height = {
+        // Calculate the actual height needed for a square image
+        // Terminal characters are typically ~2:1 (height:width) in pixels
+        let actual_img_height = (configs.app_config.cover_img_width / 2).max(1).min(configs.app_config.cover_img_length);
+        std::cmp::max(actual_img_height + 1, playback_height)
+    };
 
     // +2 for top/bottom borders
-    let playback_width = (playback_width + 2) as u16;
+    let playback_height = (playback_height + 2) as u16;
 
     match configs.app_config.layout.playback_window_position {
         config::Position::Top => {
             let chunks =
-                Layout::vertical([Constraint::Length(playback_width), Constraint::Fill(0)])
+                Layout::vertical([Constraint::Length(playback_height), Constraint::Fill(0)])
                     .split(rect);
 
             (chunks[0], chunks[1])
         }
         config::Position::Bottom => {
             let chunks =
-                Layout::vertical([Constraint::Fill(0), Constraint::Length(playback_width)])
+                Layout::vertical([Constraint::Fill(0), Constraint::Length(playback_height)])
                     .split(rect);
 
             (chunks[1], chunks[0])

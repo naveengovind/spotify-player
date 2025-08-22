@@ -228,6 +228,7 @@ cargo install spotify_player --features sixel
 
 - Not all terminals supported by [libsixel](https://github.com/saitoha/libsixel) are supported by `spotify_player` as it relies on a [third-party library](https://github.com/atanunq/viuer) for image rendering. A possible list of supported terminals can be found in [here](https://github.com/atanunq/viuer/blob/dc81f44a97727e04be0b000712e9233c92116ff8/src/printer/sixel.rs#L83-L95).
 - Images rendered by `sixel` can have a _weird_ scale. It's recommended to tweak the `cover_img_scale` config option to get the best result as the scaling works differently with different terminals and fonts.
+- For tmux users with Ghostty: The app now automatically detects and fixes blurry image rendering in tmux under Ghostty by forcing the Kitty protocol. You can also manually specify the image protocol in your config with `image_protocol = "kitty"` (options: "kitty", "iterm", "sixel").
 
 Examples of image rendering:
 
